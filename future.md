@@ -1,0 +1,10 @@
+- client
+  - tauri app
+    - [ ] 后端
+    - [ ] 设置
+    - [ ] 托盘
+- extension
+  - chrome extension
+    - [ ] 弹窗
+    - [ ] 右键菜单
+    - [ ] web link ...
