@@ -14,6 +14,13 @@ declare module 'vue' {
     AddDialog: typeof import('./src/components/addDialog.vue')['default']
     Browser: typeof import('./src/components/browser.vue')['default']
     Button: typeof import('primevue/button')['default']
+    Checkbox: typeof import('primevue/checkbox')['default']
+    ConfirmDialog: typeof import('primevue/confirmdialog')['default']
+    Dialog: typeof import('primevue/dialog')['default']
+    InputNumber: typeof import('primevue/inputnumber')['default']
+    InputText: typeof import('primevue/inputtext')['default']
+    OrderList: typeof import('primevue/orderlist')['default']
     Setting: typeof import('./src/components/setting.vue')['default']
+    Toast: typeof import('primevue/toast')['default']
   }
 }

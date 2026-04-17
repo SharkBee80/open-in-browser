@@ -1,6 +1,8 @@
 <template>
 	<div class="flex justify-between items-center">
-		<h1 class="text-xl font-bold mb-4">Settings</h1>
+		<a href="/popup.html" :target="chromename + 'popup'">
+			<h1 class="text-xl font-bold mb-4">Settings</h1>
+		</a>
 		<div class="flex items-center gap-2">
 			<Button :icon="'pi pi-spin ' + (isDark ? 'pi-moon' : 'pi-sun')" rounded severity="contrast" size="small"
 				@click="toggleDark()" />
@@ -24,7 +26,7 @@
 	const isDark = useDark();
 	const toggleDark = useToggle(isDark)
 	const model = defineModel<{ port: number, secret: string }>({ default: DEFAULT_KEY })
-
+	const chromename = chrome.runtime.id + '_';
 	const reset = () => {
 		model.value = DEFAULT_KEY;
 	}

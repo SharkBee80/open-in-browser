@@ -25,4 +25,13 @@ export default defineConfig({
       "@": fileURLToPath(new URL("./src", import.meta.url)),
     },
   },
+  build: {
+    rollupOptions: {
+      input: {
+        // popup: "./popup.html",
+        settings: "./settings.html",
+        // background: "./src/background/index.html",
+      },
+    },
+  },
 });
