@@ -1,8 +1,27 @@
 {
-	"name": "open-in-browser",
+	"name": "Open In Browser",
 	"version": "1.0",
 	"manifest_version": 3,
 	"action": {
-		"default_popup": "hello.html"
-	}
+		"default_popup": "popup.html"
+	},
+	"icons": {
+		"32": "public/32x32.png",
+		"64": "public/64x64.png",
+		"128": "public/128x128.png",
+		"256": "public/128x128@2x.png"
+	},
+	"permissions": [
+		"activeTab"
+	],
+	"web_accessible_resources": [
+		{
+			"resources": [
+				"settings.html"
+			],
+			"matches": [
+				"<all_urls>"
+			]
+		}
+	]
 }

@@ -1,160 +1,151 @@
-<script setup lang="ts">
-import { ref } from "vue";
-import { invoke } from "@tauri-apps/api/core";
-
-const greetMsg = ref("");
-const name = ref("");
-
-async function greet() {
-  // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-  greetMsg.value = await invoke("greet", { name: name.value });
-}
-</script>
-
 <template>
   <main class="container">
-    <h1>Welcome to Tauri + Vue</h1>
-
-    <div class="row">
-      <a href="https://vite.dev" target="_blank">
-        <img src="/vite.svg" class="logo vite" alt="Vite logo" />
-      </a>
-      <a href="https://tauri.app" target="_blank">
-        <img src="/tauri.svg" class="logo tauri" alt="Tauri logo" />
-      </a>
-      <a href="https://vuejs.org/" target="_blank">
-        <img src="./assets/vue.svg" class="logo vue" alt="Vue logo" />
-      </a>
+    <div class="title">
+      <h1>应用设置</h1>
+      <button @click="updatePort">应用并重启</button>
     </div>
-    <p>Click on the Tauri, Vite, and Vue logos to learn more.</p>
+    <div class="settings-card">
+      <div class="setting-item">
+        <label for="port-input">HTTP 服务端口:</label>
+        <div class="input-group">
+          <input id="port-input" v-model.number="port" type="number" placeholder="例如: 3000" />
 
-    <form class="row" @submit.prevent="greet">
-      <input id="greet-input" v-model="name" placeholder="Enter a name..." />
-      <button type="submit">Greet</button>
-    </form>
-    <p>{{ greetMsg }}</p>
+        </div>
+      </div>
+      <div class="setting-item">
+        <label for="key-input">鉴权 Key:</label>
+        <div class="input-group">
+          <input id="key-input" v-model="key" type="text" placeholder="default" />
+        </div>
+      </div>
+
+      <p class="status-msg" :class="{ error: status.includes('失败') }">
+        {{ status }}
+      </p>
+      <Info :port></Info>
+    </div>
   </main>
 </template>
+<script setup lang="ts">
+  import { ref, onMounted } from "vue";
+  import { invoke } from "@tauri-apps/api/core";
+  import Info from "./info.vue";
+
+  const port = ref(52798);
+  const key = ref("open-in-browser");
+  const status = ref("");
+
+  async function loadConfig() {
+    try {
+      const config = await invoke<{ port: number; key: string }>("get_config");
+      port.value = config.port;
+      key.value = config.key;
+    } catch (e) {
+      status.value = "加载配置失败: " + e;
+    }
+  }
+
+  async function updatePort() {
+    status.value = "正在更新配置...";
+    try {
+      await invoke("update_config", { port: port.value, key: key.value });
+      status.value = `已更新：端口=${port.value}，key已同步`;
+    } catch (e) {
+      status.value = "更新失败: " + e;
+    }
+  }
+
+  onMounted(() => {
+    loadConfig();
+  });
+</script>
 
 <style scoped>
-.logo.vite:hover {
-  filter: drop-shadow(0 0 2em #747bff);
-}
-
-.logo.vue:hover {
-  filter: drop-shadow(0 0 2em #249b73);
-}
-
-</style>
-<style>
-:root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 400;
-
-  color: #0f0f0f;
-  background-color: #f6f6f6;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
-}
-
-.container {
-  margin: 0;
-  padding-top: 10vh;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  text-align: center;
-}
-
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
-}
-
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
-}
-
-.row {
-  display: flex;
-  justify-content: center;
-}
-
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-
-a:hover {
-  color: #535bf2;
-}
-
-h1 {
-  text-align: center;
-}
-
-input,
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
-}
-
-button {
-  cursor: pointer;
-}
-
-button:hover {
-  border-color: #396cd8;
-}
-button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
-}
-
-input,
-button {
-  outline: none;
-}
-
-#greet-input {
-  margin-right: 5px;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
+  .title {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
   }
 
-  a:hover {
-    color: #24c8db;
+  .container {
+    padding: 2rem;
+    max-width: 600px;
+    margin: 0 auto;
   }
 
-  input,
+  .settings-card {
+    background: white;
+    padding: 2rem;
+    border-radius: 12px;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    text-align: left;
+  }
+
+  .setting-item {
+    margin-bottom: 1.5rem;
+  }
+
+  label {
+    display: block;
+    margin-bottom: 0.5rem;
+    font-weight: bold;
+  }
+
+  .input-group {
+    display: flex;
+    gap: 10px;
+  }
+
+  input {
+    flex: 1;
+    padding: 8px 12px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 1rem;
+  }
+
   button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
+    padding: 8px 16px;
+    background-color: #24c8db;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: bold;
+    transition: background 0.2s;
   }
-  button:active {
-    background-color: #0f0f0f69;
-  }
-}
 
+  button:hover {
+    background-color: #1ea7b9;
+  }
+
+  .status-msg {
+    font-size: 0.9rem;
+    color: #666;
+    margin-top: 1rem;
+  }
+
+  .status-msg.error {
+    color: #e74c3c;
+  }
+
+  .info {
+    margin-top: 2rem;
+    padding-top: 1rem;
+    border-top: 1px solid #eee;
+  }
+
+  .info h3 {
+    font-size: 1rem;
+    margin-bottom: 0.5rem;
+  }
+
+  code {
+    display: block;
+    background: #f4f4f4;
+    padding: 10px;
+    border-radius: 4px;
+    font-family: monospace;
+    word-break: break-all;
+  }
 </style>
