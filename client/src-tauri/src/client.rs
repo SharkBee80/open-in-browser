@@ -1,286 +1,218 @@
-use crate::config::Config;
-use crate::error::AppError;
-use crate::{store, utils};
-use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
-use std::collections::HashMap;
-use std::process::Command;
-use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, State};
-use tauri_plugin_store::StoreExt;
-use tiny_http::{Header, Method, Response, Server, StatusCode};
-use tokio::sync::{oneshot, OnceCell};
-pub struct AppState {
-    pub(crate) config: Arc<Mutex<Config>>,
-    pub(crate) server_handle: Arc<Mutex<Option<ServerHandle>>>,
-    pub(crate) auth: Arc<Mutex<AuthCache>>,
-}
+//! HTTP 服务器客户端模块
+//!
+//! 负责启动和管理 HTTP 服务器，处理浏览器打开请求。
 
+use crate::error::AppError;
+use crate::store;
+use crate::utils;
+use axum::{
+    extract::State,
+    http::{header, HeaderMap, StatusCode, Uri},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+    Json, Router,
+};
+use serde_json::json;
+use tower_http::cors::{Any, CorsLayer};
+
+use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+use std::sync::{Arc, Mutex};
+use tauri::AppHandle;
+use tauri_plugin_store::StoreExt;
+use tokio::sync::oneshot;
+
+// 常量定义
+/// 认证请求头名称
+const AUTH_HEADER: &str = "x-openinbrowser-auth";
+
+/// 服务器句柄，用于管理服务器生命周期
 pub struct ServerHandle {
+    /// 停止信号发送器
     pub stop_tx: oneshot::Sender<()>,
+    /// 服务器任务句柄
     pub join: tokio::task::JoinHandle<()>,
 }
 
 impl ServerHandle {
+    /// 停止服务器
     pub async fn stop(self) {
         let _ = self.stop_tx.send(());
         let _ = self.join.await;
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct AuthCache {
-    key: String,
-}
+/// 启动 HTTP 服务器
+///
+/// # 参数
+/// * `state` - 应用状态
+/// * `port` - 服务器端口
+///
+/// # 返回
+/// 服务器句柄，用于后续停止或重启
+pub async fn start_server(state: store::AppState, port: u16) -> ServerHandle {
+    // 配置 CORS - 允许所有来源、方法和请求头
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
 
-impl AuthCache {
-    pub fn new(key: String) -> Self {
-        Self { key }
-    }
+    // 构建路由
+    let app = Router::new()
+        .route("/", get(root))
+        .route("/cmd", post(cmd).get(not_found))
+        .route("/favicon.ico", get(favicon))
+        .fallback(not_found)
+        .layer(cors)
+        .with_state(state);
 
-    pub fn update_key(&mut self, key: String) {
-        self.key = key;
-    }
+    // 绑定监听器
+    let listener = tokio::net::TcpListener::bind(format!("localhost:{}", port))
+        .await
+        .expect("Failed to bind TCP listener");
 
-    pub fn key(&self) -> &str {
-        &self.key
-    }
-}
+    // 创建停止信号通道
+    let (stop_tx, stop_rx) = oneshot::channel::<()>();
 
-pub async fn start_server(auth: Arc<Mutex<AuthCache>>, port: u16) -> Result<ServerHandle, String> {
-    let server = Server::http(format!("127.0.0.1:{port}")).map_err(|e| {
-        AppError::HttpBind(format!("Failed to bind 127.0.0.1:{port}: {e}")).to_string()
-    })?;
-    let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
-
-    let join = tokio::task::spawn_blocking(move || {
-        // Polling loop so we can also observe stop_rx.
-        // recv_timeout keeps this thread responsive without spinning.
-        loop {
-            match stop_rx.try_recv() {
-                Ok(()) => break,
-                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
-                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => break,
-            }
-
-            let req = match server.recv_timeout(std::time::Duration::from_millis(200)) {
-                Ok(Some(rq)) => rq,
-                Ok(None) => continue,
-                Err(_) => break,
-            };
-
-            let (path, query) = split_path_and_query(req.url());
-            let method = req.method().clone();
-
-            let resp = match (method, path) {
-                (Method::Options, _) => options_response(),
-                (Method::Get, "/") => root_response(),
-                (Method::Get, "/open") => open_response(&req, &auth, query),
-                (Method::Get, "/favicon.ico") => favicon_response(),
-                _ => not_found_response(path),
-            };
-
-            let _ = req.respond(with_cors(resp));
-        }
+    // 启动服务器任务
+    let join = tokio::spawn(async move {
+        let server = axum::serve(listener, app).with_graceful_shutdown(async {
+            stop_rx.await.ok();
+        });
+        let _ = server.await;
     });
 
-    Ok(ServerHandle { stop_tx, join })
+    ServerHandle { stop_tx, join }
 }
-fn split_path_and_query(url: &str) -> (&str, &str) {
-    match url.split_once('?') {
-        Some((p, q)) => (p, q),
-        None => (url, ""),
+
+/// 重启 HTTP 服务器
+///
+/// # 参数
+/// * `state` - 应用状态
+/// * `port` - 新端口
+pub async fn restart_server(state: store::AppState, port: u16) {
+    // 原子性地取出旧服务器句柄
+    let old_handle = {
+        let mut lock = state.server_handle.lock().unwrap();
+        lock.take()
+    };
+
+    // 停止旧服务器
+    if let Some(handle) = old_handle {
+        handle.stop().await;
+    }
+
+    // 启动新服务器
+    let handle = start_server(state.clone(), port).await;
+
+    // 原子性地设置新服务器句柄
+    {
+        let mut lock = state.server_handle.lock().unwrap();
+        *lock = Some(handle);
     }
 }
 
-fn with_cors(mut resp: Response<std::io::Cursor<Vec<u8>>>) -> Response<std::io::Cursor<Vec<u8>>> {
-    let cors_headers = [
-        ("Access-Control-Allow-Origin", "*"),
-        ("Access-Control-Allow-Methods", "GET, OPTIONS"),
-        (
-            "Access-Control-Allow-Headers",
-            "Content-Type, x-openinbrowser-auth",
-        ),
-        ("Access-Control-Max-Age", "86400"),
-    ];
-
-    for (name, value) in cors_headers {
-        if let Ok(header) = Header::from_bytes(name.as_bytes(), value.as_bytes()) {
-            resp = resp.with_header(header);
-        }
-    }
-
-    resp
+/// 根路径处理器
+async fn root() -> &'static str {
+    "open-in-browser is running.\n\nUse: POST /cmd with JSON.stringify body:\n[\"cmd1 arg1\",\"cmd2 arg2\"]\nAuth header: x-openinbrowser-auth\n"
 }
 
-fn root_response() -> Response<std::io::Cursor<Vec<u8>>> {
-    Response::from_string(
-        "open-in-browser is running.\n\nUse: GET /open?b=[browser_path]&url=[url]\nAuth header: x-openinbrowser-auth\n",
+/// Favicon 处理器
+async fn favicon() -> impl IntoResponse {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, "image/x-icon".parse().unwrap());
+    (headers, store::FAVICON_BYTES)
+}
+
+/// 404 未找到处理器
+async fn not_found(uri: Uri) -> impl IntoResponse {
+    (
+        StatusCode::NOT_FOUND,
+        format!("404 Not Found: {}\n", uri.path()),
     )
-    .with_status_code(StatusCode(200))
 }
 
-fn options_response() -> Response<std::io::Cursor<Vec<u8>>> {
-    Response::from_string("").with_status_code(StatusCode(204))
+/// 创建错误响应
+///
+/// # 参数
+/// * `status` - HTTP 状态码
+/// * `message` - 错误消息
+fn create_error_response(status: StatusCode, message: impl Into<String>) -> Response {
+    (
+        status,
+        Json(json!({ "error": message.into(), "success": false })),
+    )
+        .into_response()
 }
 
-fn favicon_response() -> Response<std::io::Cursor<Vec<u8>>> {
-    let header = Header::from_bytes(b"Content-Type", b"image/x-icon").expect("valid header");
-    Response::from_data(store::FAVICON_BYTES.to_vec()).with_header(header)
+/// 创建 400 错误响应
+pub fn bad_request(msg: impl Into<String>) -> Response {
+    create_error_response(StatusCode::BAD_REQUEST, msg)
 }
 
-fn not_found_response(path: &str) -> Response<std::io::Cursor<Vec<u8>>> {
-    Response::from_string(format!("404 Not Found: {path}\n")).with_status_code(StatusCode(404))
+/// 创建 401 错误响应
+fn unauthorized_response(msg: impl Into<String>) -> Response {
+    create_error_response(StatusCode::UNAUTHORIZED, msg)
 }
 
-fn bad_request_response(msg: impl Into<String>) -> Response<std::io::Cursor<Vec<u8>>> {
-    utils::json_response(&serde_json::json!({ "error": msg.into() }), StatusCode(400))
+/// 创建 500 错误响应
+#[allow(dead_code)]
+fn internal_error_response(msg: impl Into<String>) -> Response {
+    create_error_response(StatusCode::INTERNAL_SERVER_ERROR, msg)
 }
 
-fn unauthorized_response(msg: impl Into<String>) -> Response<std::io::Cursor<Vec<u8>>> {
-    utils::json_response(&serde_json::json!({ "error": msg.into() }), StatusCode(401))
-}
-
-fn internal_error_response(msg: impl Into<String>) -> Response<std::io::Cursor<Vec<u8>>> {
-    utils::json_response(&serde_json::json!({ "error": msg.into() }), StatusCode(500))
-}
-
-fn open_response(
-    req: &tiny_http::Request,
-    auth: &Arc<Mutex<AuthCache>>,
-    query: &str,
-) -> Response<std::io::Cursor<Vec<u8>>> {
-    if let Err(msg) = verify_auth(req, auth) {
+/// 命令处理器 - 执行命令（支持单条和多条命令）
+async fn cmd(
+    headers: HeaderMap,
+    State(state): State<store::AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    // 验证认证信息
+    let config = state.config.lock().unwrap();
+    if let Err(msg) = verify_auth(&headers, &config.key) {
         return unauthorized_response(msg);
     }
 
-    let params = parse_query_params(query);
-    let browser = match params.get("b") {
-        Some(b) if !b.is_empty() => b,
-        _ => return bad_request_response("Missing 'b' (browser path) parameter\n"),
-    };
-
-    let url = match params.get("url") {
-        Some(u) if !u.is_empty() => u,
-        _ => return bad_request_response("Missing 'url' parameter\n"),
-    };
-
-    let args = match params.get("args") {
-        Some(a) if !a.is_empty() => a,
-        _ => "",
-    };
-
-    match open_with_browser(browser, url, args) {
-        Ok(_) => Response::from_string(format!("Success: Opening {url} with {browser}\n"))
-            .with_status_code(StatusCode(200)),
-        Err(e) => internal_error_response(format!("Error: {e}\n")),
-    }
-}
-
-fn parse_query_params(query: &str) -> HashMap<String, String> {
-    // Minimal parser:
-    // - splits on '&'
-    // - key/value split on first '='
-    // - percent-decodes (+ treated as space)
-    let mut out = HashMap::new();
-    if query.is_empty() {
-        return out;
-    }
-    for pair in query.split('&') {
-        if pair.is_empty() {
-            continue;
-        }
-        let (k, v) = match pair.split_once('=') {
-            Some((k, v)) => (k, v),
-            None => (pair, ""),
-        };
-        let k = percent_decode_www_form(k);
-        if k.is_empty() {
-            continue;
-        }
-        let v = percent_decode_www_form(v);
-        out.insert(k, v);
-    }
-    out
-}
-
-fn percent_decode_www_form(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b'%' if i + 2 < bytes.len() => {
-                let h1 = from_hex(bytes[i + 1]);
-                let h2 = from_hex(bytes[i + 2]);
-                if let (Some(a), Some(b)) = (h1, h2) {
-                    out.push((a << 4) | b);
-                    i += 3;
-                } else {
-                    // Invalid escape, keep literal '%'
-                    out.push(b'%');
-                    i += 1;
-                }
-            }
-            b => {
-                out.push(b);
-                i += 1;
+    // 解析命令列表
+    let cmd_strings: Vec<String> = if body.is_array() {
+        match serde_json::from_value::<Vec<String>>(body) {
+            Ok(cmds) => cmds,
+            Err(e) => {
+                return bad_request(format!("Invalid command array: {}", e));
             }
         }
-    }
-    String::from_utf8_lossy(&out).to_string()
+    } else {
+        return bad_request("Missing 'cmd' or 'cmds' field");
+    };
+
+    let parsed_commands = match utils::check_command(&cmd_strings) {
+        Ok(cmds) => cmds,
+        Err(response) => return response,
+    };
+
+    utils::execute_commands(&parsed_commands)
 }
 
-fn from_hex(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
-}
-
-fn open_with_browser(browser: &str, url: &str, args: &str) -> std::io::Result<()> {
-    let mut command = Command::new(browser);
-    command.arg(url);
-
-    if !args.trim().is_empty() {
-        let extra_args = shell_words::split(args)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-        command.args(&extra_args);
-        // 调试：打印实际命令（仅开发用）
-        // println!("Executing: {} {} {:?}", browser, url, extra_args);
-    }
-
-    command.spawn()?;
-    Ok(())
-}
-
-fn verify_auth(req: &tiny_http::Request, auth: &Arc<Mutex<AuthCache>>) -> Result<(), String> {
-    // Header carries JWT token signed by shared key.
-    const HDR: &str = "x-openinbrowser-auth";
-
-    let token = req
-        .headers()
-        .iter()
-        .find(|h| h.field.equiv(HDR))
-        .map(|h| h.value.as_str())
+/// 验证 JWT 认证信息
+///
+/// # 参数
+/// * `headers` - HTTP 请求头
+/// * `key` - JWT 密钥
+///
+/// # 错误
+/// 如果认证失败，返回错误消息
+fn verify_auth(headers: &HeaderMap, key: &str) -> Result<(), String> {
+    // 提取 token
+    let token = headers
+        .get(AUTH_HEADER)
+        .and_then(|h| h.to_str().ok())
         .ok_or_else(|| AppError::AuthMissingHeader.to_string())?;
 
-    let key = {
-        let lock = auth
-            .lock()
-            .map_err(|_| AppError::ConfigLockPoisoned.to_string())?;
-        lock.key().to_string()
-    };
-
+    // 配置验证器
     let mut validation = Validation::new(Algorithm::HS256);
     validation.validate_exp = true;
     validation.leeway = 1;
 
+    // 解码并验证 JWT
     decode::<serde_json::Value>(
         token,
         &DecodingKey::from_secret(key.as_bytes()),
@@ -291,33 +223,37 @@ fn verify_auth(req: &tiny_http::Request, auth: &Arc<Mutex<AuthCache>>) -> Result
     Ok(())
 }
 
-static APP_HANDLE: OnceCell<Arc<AppHandle>> = OnceCell::const_new();
-fn app_handle() -> Result<&'static Arc<AppHandle>, AppError> {
-    APP_HANDLE.get().ok_or(AppError::MissingAppHandle)
-}
-pub fn init_client(
-    app_handle: &AppHandle,
-    server_handle: Arc<Mutex<Option<ServerHandle>>>,
-    auth: Arc<Mutex<AuthCache>>,
-) {
-    APP_HANDLE.set(Arc::new(app_handle.clone())).ok();
+/// 初始化客户端
+///
+/// # 参数
+/// * `app_handle` - Tauri 应用句柄
+/// * `server_handle` - 服务器句柄的共享引用
+pub fn init_client(app_handle: &AppHandle, server_handle: Arc<Mutex<Option<ServerHandle>>>) {
+    store::APP_HANDLE.set(Arc::new(app_handle.clone())).ok();
+
     tauri::async_runtime::spawn(async move {
-        if let Err(e) = setup_client(server_handle, auth).await {
+        if let Err(e) = setup_client(server_handle).await {
             eprintln!("init_client failed: {e}");
         }
     });
 }
 
-async fn setup_client(
-    server_handle: Arc<Mutex<Option<ServerHandle>>>,
-    auth: Arc<Mutex<AuthCache>>,
-) -> Result<(), String> {
-    use crate::config::{DEFAULT_KEY, DEFAULT_PORT, STORE_FILE};
-    let store = app_handle()
+/// 设置客户端（异步）
+///
+/// # 参数
+/// * `server_handle` - 服务器句柄的共享引用
+///
+/// # 错误
+/// 如果初始化失败，返回错误消息
+async fn setup_client(server_handle: Arc<Mutex<Option<ServerHandle>>>) -> Result<(), String> {
+    use crate::store::{DEFAULT_KEY, DEFAULT_PORT, STORE_FILE};
+
+    let store = store::app_handle()
         .map_err(|e| e.to_string())?
         .store(STORE_FILE)
         .map_err(|e| AppError::StoreOpen(e.to_string()).to_string())?;
 
+    // 读取或创建默认配置
     let port: u16 = store
         .get("port")
         .and_then(|v| v.as_u64())
@@ -329,80 +265,26 @@ async fn setup_client(
         .and_then(|v| v.as_str().map(|s| s.to_string()))
         .unwrap_or_else(|| DEFAULT_KEY.to_string());
 
-    // If missing/invalid, write fallback so next launch is stable
+    // 确保配置持久化（如果缺失则写入默认值）
     store.set("port", serde_json::json!(port));
     store.set("key", serde_json::json!(key));
     let _ = store.save();
 
-    {
-        let mut lock = auth
-            .lock()
-            .map_err(|_| AppError::ConfigLockPoisoned.to_string())?;
-        lock.update_key(key.clone());
-    }
+    // 创建应用状态
+    let app_state = store::AppState {
+        config: Arc::new(Mutex::new(store::Config {
+            port,
+            key: key.clone(),
+        })),
+        server_handle: Arc::clone(&server_handle),
+    };
 
-    // Start HTTP server and keep handle for restarts.
-    let handle = start_server(Arc::clone(&auth), port).await?;
+    // 启动 HTTP 服务器
+    let handle = start_server(app_state, port).await;
     {
         let mut lock = server_handle.lock().unwrap();
         *lock = Some(handle);
     }
-    Ok(())
-}
 
-pub async fn update_config(
-    port: u16,
-    key: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
-    let old_port = { state.config.lock().unwrap().port };
-
-    persist_config(&Config {
-        port,
-        key: key.clone(),
-    })?;
-    // 1. Update config
-    {
-        let mut config = state.config.lock().unwrap();
-        config.port = port;
-        config.key = key;
-    }
-
-    {
-        if let (Ok(cfg), Ok(mut auth)) = (state.config.lock(), state.auth.lock()) {
-            auth.update_key(cfg.key.clone());
-        }
-    }
-
-    // Restart server only when port changed. Key updates are hot (read from shared Config).
-    if old_port != port {
-        // (port changed) stop old server and start new one
-        let old_handle = { state.server_handle.lock().unwrap().take() };
-        if let Some(handle) = old_handle {
-            handle.stop().await;
-        }
-
-        let new_handle = start_server(Arc::clone(&state.auth), port).await?;
-        {
-            let mut handle_lock = state.server_handle.lock().unwrap();
-            *handle_lock = Some(new_handle);
-        }
-    }
-
-    Ok(())
-}
-
-pub fn persist_config(config: &Config) -> Result<(), String> {
-    use crate::config::STORE_FILE;
-
-    let store = app_handle()
-        .map_err(|e| e.to_string())?
-        .store(STORE_FILE)
-        .map_err(|e| AppError::StoreOpen(e.to_string()).to_string())?;
-    store.set("port", serde_json::json!(config.port));
-    store.set("key", serde_json::json!(config.key));
-    store
-        .save()
-        .map_err(|e| AppError::StoreSave(e.to_string()).to_string())?;
     Ok(())
 }

@@ -22,7 +22,16 @@
       <p class="status-msg" :class="{ error: status.includes('失败') }">
         {{ status }}
       </p>
-      <Info :port></Info>
+
+      <div class="info-section">
+        <div class="info-header" @click="toggleInfo">
+          <span>使用说明</span>
+          <span class="info-arrow" :class="{ collapsed: isInfoCollapsed }">▼</span>
+        </div>
+        <transition name="info-collapse">
+          <Info v-if="!isInfoCollapsed" :port></Info>
+        </transition>
+      </div>
     </div>
   </main>
 </template>
@@ -34,6 +43,11 @@
   const port = ref(52798);
   const key = ref("open-in-browser");
   const status = ref("");
+  const isInfoCollapsed = ref(true); // 默认折叠
+
+  function toggleInfo() {
+    isInfoCollapsed.value = !isInfoCollapsed.value;
+  }
 
   async function loadConfig() {
     try {
@@ -61,6 +75,10 @@
 </script>
 
 <style scoped>
+  :global(html ::-webkit-scrollbar) {
+    display: none;
+  }
+
   .title {
     display: flex;
     justify-content: space-between;
@@ -129,10 +147,55 @@
     color: #e74c3c;
   }
 
-  .info {
-    margin-top: 2rem;
-    padding-top: 1rem;
+  .info-section {
+    margin-top: 1.5rem;
     border-top: 1px solid #eee;
+  }
+
+  .info-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem 0;
+    cursor: pointer;
+    font-weight: bold;
+    color: #333;
+    user-select: none;
+    transition: color 0.2s;
+  }
+
+  .info-header:hover {
+    color: #24c8db;
+  }
+
+  .info-arrow {
+    transition: transform 0.3s ease;
+    font-size: 0.8rem;
+  }
+
+  .info-arrow.collapsed {
+    transform: rotate(-90deg);
+  }
+
+  .info-collapse-enter-active,
+  .info-collapse-leave-active {
+    transition: all 0.3s ease;
+    overflow: hidden;
+    max-height: 500px;
+    opacity: 1;
+  }
+
+  .info-collapse-enter-from,
+  .info-collapse-leave-to {
+    max-height: 0;
+    opacity: 0;
+    margin-top: 0;
+    padding-top: 0;
+  }
+
+  .info {
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
   }
 
   .info h3 {

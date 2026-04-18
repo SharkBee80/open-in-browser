@@ -39,24 +39,24 @@
 	const openSettings = () => window.open('/settings.html', chromename + "set");
 
 	const open = async (path: string, args?: string) => {
-		let data: any;
+		let data: { error: string, success: boolean, statusCode?: number } | null = null;
 		try {
 			const re = await send(path, args);
 			console.log(re);
-			if (re && !re.ok) {
-				data = await re.json() as { error: string };
-				if (!data.error) return;
-				Object.assign(data, {
+			if (re) {
+				data = await re.json();
+				if (data?.success) return;
+				Object.assign(data || {}, {
 					statusCode: re.status,
 				});
 			}
-		}
-		catch (e: any) {
+		} catch (e: any) {
 			data = {
 				error: e.message,
+				success: false,
 			};
 		}
-		if (!data) return;
+		if (data?.success ?? false) return;
 		const jsonString = JSON.stringify(data, null, 2);
 		const blob = new Blob([jsonString], { type: 'application/json' });
 		const url = URL.createObjectURL(blob);

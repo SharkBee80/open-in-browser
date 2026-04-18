@@ -67,19 +67,25 @@ async function getActiveTabUrl(): Promise<string | null> {
 export async function send(b: string, args?: string) {
   const api = new URL("http://localhost");
   api.port = String(config.value.key.port);
-  api.pathname = "/open";
-  api.searchParams.set("b", b);
+  api.pathname = "/cmd";
 
   const url = await getActiveTabUrl();
   if (!url) return;
-  api.searchParams.set("url", url);
-  if (args) api.searchParams.set("args", args);
+
+  // 构建命令字符串
+  let cmd = b + " " + url;
+  // 添加额外参数
+  if (args) {
+    cmd += ` ${args}`;
+  }
+
   const authHeader = await generateAuthToken();
   return await fetch(api.href, {
-    method: "GET",
+    method: "POST",
     headers: {
       "Content-Type": "application/json",
       ...authHeader,
     },
+    body: JSON.stringify([cmd]),
   });
 }
